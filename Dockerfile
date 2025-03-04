@@ -7,6 +7,31 @@
 # https://github.com/docker-library/php/blob/fab49d4cb1c61e4f74c2dffe06961408212f054c/5.6/stretch/fpm/Dockerfile
 FROM debian:bookworm-slim
 
+# muzso: PHP 5.6.40 doesn't compile with a number of packages from Debian bookworm.
+# We've to use the ones from stretch.
+RUN set -eux; \
+	{ \
+		echo; \
+		echo 'Types: deb'; \
+		echo 'URIs: http://archive.debian.org/debian'; \
+		echo 'Suites: stretch'; \
+		echo 'Components: main'; \
+		echo 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg'; \
+	} >> /etc/apt/sources.list.d/debian.sources; \
+	{ \
+		echo; \
+		echo 'Types: deb'; \
+		echo 'URIs: http://archive.debian.org/debian-security'; \
+		echo 'Suites: stretch/updates'; \
+		echo 'Components: main'; \
+		echo 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg'; \
+	} >> /etc/apt/sources.list.d/debian.sources; \
+	{ \
+		echo 'Package: *curl* libssl* libicu* icu-* libmcrypt*'; \
+		echo 'Pin: release n=stretch'; \
+		echo 'Pin-Priority: 600'; \
+	} > /etc/apt/preferences.d/stretch;
+
 # prevent Debian's PHP packages from being installed
 # https://github.com/docker-library/php/pull/542
 RUN set -eux; \
@@ -22,9 +47,14 @@ ENV PHPIZE_DEPS \
 		autoconf \
 		dpkg-dev \
 		file \
-		g++ \
-		gcc \
-		libc-dev \
+		# muzso: with bookworm's GCC 11/12 we get 6 compilation errors on aarch64
+		# platforms in /usr/src/php/Zend/zend_operators.c
+		# e.g. "Error: operand 2 must be an integer register -- `mul x1,v0,v1'"
+		# g++ \
+		# gcc \
+		g++-6 \
+		gcc-6 \
+		libc6-dev \
 		make \
 		pkg-config \
 		re2c
@@ -38,7 +68,9 @@ RUN set -eux; \
 		curl \
 		xz-utils \
 	; \
-	rm -rf /var/lib/apt/lists/*
+	# muzso: set up symlinks for the alternative gcc
+	ln -s /usr/bin/gcc-6 /usr/local/bin/gcc; \
+	ln -s /usr/bin/g++-6 /usr/local/bin/g++;
 
 ENV WWW_ROOT /var/www/html
 ENV PHP_INI_DIR /usr/local/etc/php
@@ -54,11 +86,11 @@ RUN set -eux; \
 # Make PHP's main executable position-independent (improves ASLR security mechanism, and has no performance impact on x86_64)
 # Enable optimization (-O2)
 # Enable linker optimization (this sorts the hash buckets to improve cache locality, and is non-default)
+# Adds GNU HASH segments to generated executables (this is used if present, and is much faster than sysv hash; in this configuration, sysv hash is also generated)
 # https://github.com/docker-library/php/issues/272
-# -D_LARGEFILE_SOURCE and -D_FILE_OFFSET_BITS=64 (https://www.php.net/manual/en/intro.filesystem.php)
-ENV PHP_CFLAGS="-fstack-protector-strong -fpic -fpie -O2 -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64"
+ENV PHP_CFLAGS="-fstack-protector-strong -fpic -fpie -O2"
 ENV PHP_CPPFLAGS="$PHP_CFLAGS"
-ENV PHP_LDFLAGS="-Wl,-O1 -pie"
+ENV PHP_LDFLAGS="-Wl,-O1 -Wl,--hash-style=both -pie"
 
 ENV GPG_KEYS 0BD78B5F97500D450838F95DFE857D9A90D90EC1 6E4F6AB321FDC07F2C332E3AC2BF0BC433CFC8B3
 
@@ -69,9 +101,7 @@ ENV PHP_SHA256="1369a51eee3995d7fbd1c5342e5cc917760e276d561595b6052b21ace2656d1c
 RUN set -eux; \
 	\
 	savedAptMark="$(apt-mark showmanual)"; \
-	apt-get update; \
 	apt-get install -y --no-install-recommends gnupg; \
-	rm -rf /var/lib/apt/lists/*; \
 	\
 	mkdir -p /usr/src; \
 	cd /usr/src; \
@@ -108,30 +138,6 @@ COPY docker-php-source docker-php-ext-* docker-php-entrypoint /usr/local/bin/
 RUN set -eux; \
 	\
 	savedAptMark="$(apt-mark showmanual)"; \
-	# muzso: PHP 5.6.40 doesn't compile with a number of packages from bookworm.
-	# We've to use the ones from stretch.
-	{ \
-		echo; \
-		echo 'Types: deb'; \
-		echo 'URIs: http://archive.debian.org/debian'; \
-		echo 'Suites: stretch'; \
-		echo 'Components: main'; \
-		echo 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg'; \
-	} >> /etc/apt/sources.list.d/debian.sources; \
-	{ \
-		echo; \
-		echo 'Types: deb'; \
-		echo 'URIs: http://archive.debian.org/debian-security'; \
-		echo 'Suites: stretch/updates'; \
-		echo 'Components: main'; \
-		echo 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg'; \
-	} >> /etc/apt/sources.list.d/debian.sources; \
-	{ \
-		echo 'Package: *curl* libssl* libicu* icu-* libmcrypt*'; \
-		echo 'Pin: release n=stretch'; \
-		echo 'Pin-Priority: 600'; \
-	} > /etc/apt/preferences.d/stretch; \
-	apt-get update; \
 	# muzso: curl (and libcurl4) was already installed, so we've to remove it first.
 	apt-get -y purge curl; \
 	apt-get -y --purge autoremove; \
@@ -151,7 +157,6 @@ RUN set -eux; \
 		libxpm-dev \
 		libvpx-dev \
 		libfreetype-dev \
-		pkgconf \
 		libicu-dev \
 		libmcrypt-dev \
 		libexpat1-dev \
@@ -173,9 +178,6 @@ RUN set -eux; \
 	if [ ! -d /usr/include/curl ]; then \
 		ln -sT "/usr/include/$debMultiarch/curl" /usr/local/include/curl; \
 	fi; \
-	./configure --help; \
-	echo "Path to icu-config:"; \
-	which icu-config || true; \
 	./configure \
 		--build="$gnuArch" \
 		--with-config-file-path="$PHP_INI_DIR" \
@@ -289,6 +291,7 @@ RUN set -eux; \
 		| xargs -r apt-mark manual \
 	; \
 	apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+	# this was the last APT operation, we can get rid of the package lists to make the image smaller
 	rm -rf /var/lib/apt/lists/*; \
 	\
 	rm -rf /tmp/pear ~/.pearrc; \
