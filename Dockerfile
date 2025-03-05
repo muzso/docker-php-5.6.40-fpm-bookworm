@@ -5,12 +5,12 @@
 #
 # Replaced PHP with v5.6.40 from:
 # https://github.com/docker-library/php/blob/fab49d4cb1c61e4f74c2dffe06961408212f054c/5.6/stretch/fpm/Dockerfile
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS build
 
 # muzso: PHP 5.6.40 doesn't compile with a number of packages from Debian bookworm.
 # We've to use the ones from stretch.
 RUN set -eux; \
-	apt-mark showmanual > /tmp/apt_manual_initial_state.txt; \
+	apt-mark showmanual > /tmp/apt_manual_packages.txt; \
 	{ \
 		echo; \
 		echo "Types: deb"; \
@@ -70,7 +70,7 @@ RUN set -eux; \
 		$PHPIZE_DEPS \
 		ca-certificates \
 	; \
-	echo "ca-certificates" >> "/tmp/apt_manual_initial_state.txt"; \
+	echo "ca-certificates" >> "/tmp/apt_manual_packages.txt"; \
 	# muzso: set up symlinks for the alternative gcc
 	ln -s /usr/bin/gcc-6 /usr/local/bin/gcc; \
 	ln -s /usr/bin/g++-6 /usr/local/bin/g++;
@@ -130,16 +130,15 @@ RUN set -eux; \
 # in bookworm (e.g. libfreetype-dev) don't provide it anymore
 # since they depend on `pkgconfig`.
 # Thus we've to provide `freetype-config` ourselves.
-COPY freetype-config /usr/local/bin/
-COPY docker-php-source docker-php-ext-* docker-php-entrypoint /usr/local/bin/
+COPY docker-php-source docker-php-ext-* docker-php-entrypoint freetype-config /usr/local/bin/
 
 RUN set -eux; \
 	\
 	# muzso: curl (and libcurl4) was already installed, so we've to remove it first.
 	apt-get -y purge curl; \
-	apt-get -y --purge autoremove; \
 	# muzso: dependencies for extra features
 	apt-get install -y --no-install-recommends \
+		curl \
 		libcurl4-openssl-dev \
 		libedit-dev \
 		libsqlite3-dev \
@@ -279,18 +278,8 @@ RUN set -eux; \
 		| sort -u \
 		| xargs -r dpkg-query --search 2> /dev/null \
 		| cut -d: -f1 \
-		| sort -u >> "/tmp/apt_manual_initial_state.txt" \
+		| sort -u >> "/tmp/apt_manual_packages.txt" \
 	; \
-	# reset apt-mark's "manual" list so that "purge --auto-remove" will remove all build dependencies
-	apt-mark auto ".*" > /dev/null; \
-	apt-mark manual $(cat "/tmp/apt_manual_initial_state.txt"); \
-	rm "/tmp/apt_manual_initial_state.txt"; \
-	apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
-	# this was the last APT operation, we can get rid of the package lists to make the image smaller
-	rm -rf /var/lib/apt/lists/*; \
-	\
-	rm -rf /tmp/pear ~/.pearrc; \
-	\
 # smoke test
 	php --version
 
@@ -336,6 +325,28 @@ RUN set -eux; \
 	chmod -R a+r /usr/local; \
 	find /usr/local -type d -print0 | xargs -r -0 chmod a+x; \
 	find /usr/local -type f -perm /a+x -print0 | xargs -r -0 chmod a+x;
+
+
+FROM debian:bookworm-slim
+
+COPY --from=build /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/
+COPY --from=build /etc/apt/preferences.d/stretch /etc/apt/preferences.d/no-debian-php /etc/apt/preferences.d/
+COPY --from=build /tmp/apt_manual_packages.txt /tmp/
+COPY --from=build /usr/local /usr/local
+
+RUN set -eux; \
+	# reset apt-mark's "manual" list so that "purge --auto-remove" will remove all build dependencies
+	apt-get update; \
+	apt-mark auto ".*" > /dev/null; \
+	apt-get install -y --no-install-recommends $(cat "/tmp/apt_manual_packages.txt"); \
+	apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+	# this was the last APT operation, we can get rid of the package lists to make the image smaller
+	rm -rf /var/lib/apt/lists/*; \
+	rm -rf /tmp/pear ~/.pearrc; \
+	rm "/tmp/apt_manual_packages.txt"; \
+	\
+	# smoke test
+	php --version
 
 EXPOSE 9000
 CMD ["php-fpm"]
